@@ -350,11 +350,52 @@ header { padding: 64px 0 48px; border-bottom: 1px solid var(--border2); }
 <script>
 const SK = 'ymama_v1';
 let state = JSON.parse(localStorage.getItem(SK) || 'null') || {
-  people: {}, onboardingDone: false
+  people: {}, onboardingDone: false,
+  usage: { month: null, calls: 0 },
+  isPro: false
 };
+if (!state.usage) state.usage = { month: null, calls: 0 };
+if (state.isPro === undefined) state.isPro = false;
+
 let currentPersonId = null;
 
 function save() { localStorage.setItem(SK, JSON.stringify(state)); }
+
+// ── SOFT LIMITS ───────────────────────────────────────────────
+const LIMITS = { free: 30, pro: 200 };
+
+function getUsageMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${now.getMonth()}`;
+}
+
+function trackCall() {
+  const month = getUsageMonth();
+  if (state.usage.month !== month) state.usage = { month, calls: 0 };
+  state.usage.calls++;
+  save();
+}
+
+function checkLimit() {
+  const month = getUsageMonth();
+  if (state.usage.month !== month) return { ok: true, calls: 0 };
+  const limit = state.isPro ? LIMITS.pro : LIMITS.free;
+  const calls = state.usage.calls;
+  if (calls >= limit) return { ok: false, calls, limit };
+  if (calls >= limit * 0.85) return { ok: true, calls, limit, warning: true };
+  return { ok: true, calls };
+}
+
+function showLimitWarning(calls, limit) {
+  showToast(`A Carlitos le quedan ${limit - calls} transcripción${limit - calls !== 1 ? 'es' : ''} este mes.`);
+}
+
+function showLimitBlocked(limit) {
+  showToast(state.isPro
+    ? `Llegaste al límite de ${limit} transcripciones mensuales. Se reinicia el mes que viene.`
+    : `Límite gratuito alcanzado. Activá Pro para seguir subiendo audios.`
+  );
+}
 
 // ── ONBOARDING ────────────────────────────────────────────────
 function checkOnboarding() {
@@ -480,6 +521,15 @@ function goHome() {
 async function handleAudioUpload(event) {
   const files = Array.from(event.target.files);
   if (!files.length || !currentPersonId) return;
+
+  // Verificar límite antes de procesar
+  const limitCheck = checkLimit();
+  if (!limitCheck.ok) {
+    showLimitBlocked(limitCheck.limit);
+    event.target.value = '';
+    return;
+  }
+
   const p = state.people[currentPersonId];
 
   for (const file of files) {
@@ -495,6 +545,9 @@ async function handleAudioUpload(event) {
       const transcript = await transcribeAudio(file);
       const idx = p.audios.findIndex(a => a.id === audioId);
       if (idx !== -1) { p.audios[idx].transcript = transcript; p.audios[idx].processing = false; }
+      trackCall();
+      const afterCheck = checkLimit();
+      if (afterCheck.warning) showLimitWarning(afterCheck.calls, afterCheck.limit);
       save();
       renderAudios(p);
       if (p.audios.filter(a => !a.processing).length >= 2) await updateAnalysis(p);
