@@ -517,6 +517,68 @@ function goHome() {
   renderPeople();
 }
 
+// ── AUDIO COMPRESSION ─────────────────────────────────────────
+async function compressAudio(file) {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    const arrayBuffer = await file.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+    // Mezclar a mono y re-samplear a 16kHz
+    const offlineCtx = new OfflineAudioContext(1, audioBuffer.duration * 16000, 16000);
+    const source = offlineCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(offlineCtx.destination);
+    source.start();
+
+    const rendered = await offlineCtx.startRendering();
+    await audioCtx.close();
+
+    // Convertir a WAV
+    const wav = audioBufferToWav(rendered);
+    return new File([wav], file.name.replace(/\.[^.]+$/, '.wav'), { type: 'audio/wav' });
+  } catch(e) {
+    // Si falla la compresión, devolver el original
+    console.warn('Compresión falló, usando original:', e);
+    return file;
+  }
+}
+
+function audioBufferToWav(buffer) {
+  const numChannels = 1;
+  const sampleRate = buffer.sampleRate;
+  const samples = buffer.getChannelData(0);
+  const dataLength = samples.length * 2;
+  const wavBuffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(wavBuffer);
+
+  // WAV header
+  const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataLength, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * 2, true);
+  view.setUint16(32, numChannels * 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataLength, true);
+
+  // Samples
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+
+  return new Blob([wavBuffer], { type: 'audio/wav' });
+}
+
 // ── AUDIO UPLOAD ──────────────────────────────────────────────
 async function handleAudioUpload(event) {
   const files = Array.from(event.target.files);
@@ -542,7 +604,8 @@ async function handleAudioUpload(event) {
     renderPersonMeta(p);
 
     try {
-      const transcript = await transcribeAudio(file);
+      const compressed = await compressAudio(file);
+      const transcript = await transcribeAudio(compressed);
       const idx = p.audios.findIndex(a => a.id === audioId);
       if (idx !== -1) { p.audios[idx].transcript = transcript; p.audios[idx].processing = false; }
       trackCall();
